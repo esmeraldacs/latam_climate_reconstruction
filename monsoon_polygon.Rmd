@@ -13,33 +13,6 @@ library(raster)
 
 
 ```{r}
-#latin_america <- c("Venezuela", "Colombia", "Guyana", "Suriname", "France", 
-                  # "Antigua and Barbuda", "Dominica", "Ecuador", "Peru", "Uruguay",
-                 #  "Bolivia", "Paraguay", "Argentina", "Chile", "Brazil")
-
-# Filter ne_countries dataset for Latin American countries
-#latin_america_polygon <- rnaturalearth::ne_countries(scale = 'large', returnclass = "sf") %>%
-  #filter(name %in% latin_america) |>
-  #sf::st_transform(crs = "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0 +units=m +no_defs") |>
-  #sf::st_crop(xmin = -85, xmax = -30, ymin = -60, ymax = 12) |>
-  #sf::st_union()
-
-#latin_america <- c("Venezuela", "Colombia", "Guyana", "Suriname", "France", 
-                  # "Antigua and Barbuda", "Dominica", "Ecuador", "Peru", "Uruguay",
-                  # "Bolivia", "Paraguay", "Argentina", "Chile", "Brazil")
-
-# Filter ne_countries dataset for Latin American countries
-#latin_america_polygon <- rnaturalearth::ne_countries(scale = 'large', returnclass = "sf") %>%
- # filter(name %in% latin_america) |>
- # sf::st_transform(crs = "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0 +units=m +no_defs") |>
- # sf::st_crop(xmin = -85, xmax = -30, ymin = -60, ymax = 12) |>
- # sf::st_union()
-
-#ggplot() + geom_sf(data = latin_america_polygon)
-```
-
-
-```{r}
 process_nc_file <- function(file_path) {
   nc <- nc_open(file_path)
   
