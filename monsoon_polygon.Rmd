@@ -1,0 +1,162 @@
+---
+title: "extract with polygon"
+output: html_document
+date: "2024-07-22"
+---
+
+```{r}
+library(tidyverse)
+library(ncdf4)
+library(sf)
+library(raster)
+```
+
+
+```{r}
+#latin_america <- c("Venezuela", "Colombia", "Guyana", "Suriname", "France", 
+                  # "Antigua and Barbuda", "Dominica", "Ecuador", "Peru", "Uruguay",
+                 #  "Bolivia", "Paraguay", "Argentina", "Chile", "Brazil")
+
+# Filter ne_countries dataset for Latin American countries
+#latin_america_polygon <- rnaturalearth::ne_countries(scale = 'large', returnclass = "sf") %>%
+  #filter(name %in% latin_america) |>
+  #sf::st_transform(crs = "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0 +units=m +no_defs") |>
+  #sf::st_crop(xmin = -85, xmax = -30, ymin = -60, ymax = 12) |>
+  #sf::st_union()
+
+#latin_america <- c("Venezuela", "Colombia", "Guyana", "Suriname", "France", 
+                  # "Antigua and Barbuda", "Dominica", "Ecuador", "Peru", "Uruguay",
+                  # "Bolivia", "Paraguay", "Argentina", "Chile", "Brazil")
+
+# Filter ne_countries dataset for Latin American countries
+#latin_america_polygon <- rnaturalearth::ne_countries(scale = 'large', returnclass = "sf") %>%
+ # filter(name %in% latin_america) |>
+ # sf::st_transform(crs = "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0 +units=m +no_defs") |>
+ # sf::st_crop(xmin = -85, xmax = -30, ymin = -60, ymax = 12) |>
+ # sf::st_union()
+
+#ggplot() + geom_sf(data = latin_america_polygon)
+```
+
+
+```{r}
+process_nc_file <- function(file_path) {
+  nc <- nc_open(file_path)
+  
+  # Extract variables
+  lon <- ncvar_get(nc, "lon")
+  lat <- ncvar_get(nc, "lat")
+  time <- ncvar_get(nc, "time") %>% as.Date(origin = "1900-01-01")
+  pre <- ncvar_get(nc, "pre")
+  
+  # Filter for summer months (December to February)
+  summer_indices <- which(format(time, "%m") %in% c("12", "01", "02"))
+  summer_precip <- pre[,,summer_indices]
+  
+  # Calculate annual and summer precipitation
+  annual_precip <- apply(pre, c(1, 2), sum, na.rm = TRUE)
+  summer_total_precip <- apply(summer_precip, c(1, 2), sum, na.rm = TRUE)
+  
+  # Calculate percentage of summer precipitation
+  summer_precip_percentage <- (summer_total_precip / annual_precip) * 100
+  
+  # Create raster and crop to South America
+  raster_data <- raster(t(summer_precip_percentage), xmn=min(lon), xmx=max(lon), ymn=min(lat), ymx=max(lat)) %>%
+    flip(direction = "y") %>%
+    crop(extent(-83.5, -35, -60, 15))
+  
+  # Convert raster to data frame
+  df <- rasterToPoints(raster_data) %>%
+    as.data.frame(stringsAsFactors = FALSE) %>%
+    setNames(c("lon", "lat", "precip_percentage"))
+  
+  nc_close(nc)
+  return(df)
+}
+
+# Process files and combine results
+file_paths <- list.files("Input/CRU_data/", pattern = "cru_ts4.07.*.pre.dat.nc", full.names = TRUE)
+final_result <- map_dfr(file_paths, process_nc_file)
+
+# Convert final_result to a raster
+raster_data <- rasterFromXYZ(final_result)
+
+plot(raster_data)
+```
+
+
+
+```{r}
+# Convert the raster to a data frame suitable for ggplot
+raster_df <- as.data.frame(rasterToPoints(raster_data), stringsAsFactors = FALSE) %>%
+  setNames(c("lon", "lat", "precip_percentage"))
+
+# Plot using ggplot
+plot1 <- ggplot() +
+  geom_raster(data = raster_df, aes(x = lon, y = lat, fill = precip_percentage)) +
+  scico::scale_fill_scico(palette = 'lapaz',direction = -1) +
+ # geom_sf(data = latin_america_polygon, fill="transparent") +
+  #scale_fill_viridis_c(option = "plasma") +
+  coord_fixed() +
+  labs(title = "Percentage of Summer Precipitation",
+       x = "Longitude",
+       y = "Latitude",
+       fill = "Precipitation (%)") +
+  theme(panel.background = element_rect(fill="transparent", colour = "transparent"),
+        panel.border = element_rect(fill = "transparent", colour="black"))
+
+plot1
+```
+
+
+
+```{r}
+# Read the shapefile
+shapefile_data <- st_read("Input/Precipitation_polygon/15_levels_polygon_level_33.shp")
+
+# Convert the shapefile to a Spatial object
+shapefile_sp <- as(st_geometry(shapefile_data), "Spatial")
+
+# Convert the Spatial object back to an sf object
+shapefile_sf <- st_as_sf(shapefile_sp)
+
+# Mask the raster with the shapefile
+masked_raster <- mask(raster_data, shapefile_sp)
+
+# Save the masked raster to a new file (optional)
+#writeRaster(masked_raster, "path/to/save/masked_raster.tif", format = "GTiff", overwrite = TRUE)
+
+# Plot the original and masked rasters
+color_palette <- colorRampPalette(c("purple","blue", "green", "yellow", "orange","red"))
+value_range <- range(values(raster_data), values(masked_raster), na.rm = TRUE) # Get the range of values for the color scale
+
+color_scale <- color_palette(100) # Create a color scale
+
+par(mfrow = c(1, 2))
+plot(raster_data, main = "Original Raster", col = color_scale, zlim = value_range)
+plot(masked_raster, main = "Masked Raster", col = color_scale, zlim = value_range)
+
+
+
+plot2 <- ggplot() +
+  geom_raster(data = raster_df, aes(x = lon, y = lat, fill = precip_percentage)) +
+  scico::scale_fill_scico(palette = 'lapaz',direction = -1) +
+  geom_sf(data = shapefile_sf, fill="transparent",color = "gray30", size = 1.5 ) +
+  #scale_fill_viridis_c(option = "plasma") +
+#  coord_fixed() +
+  labs(title = "Percentage of Summer Precipitation",
+       x = "Longitude",
+       y = "Latitude",
+       fill = "Precipitation (%)") +
+  theme(panel.background = element_rect(fill="transparent", colour = "transparent"),
+        panel.border = element_rect(fill = "transparent", colour="black"))
+
+plot2
+```
+
+
+```{r}
+
+```
+
+
