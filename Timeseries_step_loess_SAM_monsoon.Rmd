@@ -1,0 +1,931 @@
+---
+title: "Nuevo plot"
+output: html_document
+date: "2022-10-14"
+---
+
+```{r}
+`%$%` <- magrittr::`%$%`
+library(tidyverse)
+```
+
+
+
+```{r}
+#latin_america <- c("Venezuela", "Colombia", "Guyana", "Suriname", "France", 
+                   #"Antigua and Barbuda", "Dominica", "Ecuador", "Peru", "Uruguay",
+                   #"Bolivia", "Paraguay", "Argentina", "Chile", "Brazil")
+
+
+# Filter ne_countries dataset for Latin American countries
+#latin_america_polygon <- rnaturalearth::ne_countries(scale = 'large', returnclass = "sf") %>%
+ # filter(name %in% latin_america) |>
+ # sf::st_transform(crs = "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0 +units=m +no_defs") |>
+ # sf::st_crop(xmin = -85, xmax = -30, ymin = -60, ymax = 12) |>
+ # sf::st_union()
+
+#ggplot() + geom_sf(data = latin_america_polygon)
+```
+
+
+
+Input files
+```{r}
+latam <- read.csv("C:/Users/esmer/UoR/latinam_climate/Output_train_amg/Train_amg_reconstruction_output_Hill_15.2.csv") |>
+  filter(entity!="Laguna Cerritos") |>
+  filter(elvation > -100) |>
+  mutate(entity = paste0(entity,"_",latitude,"_",longitude,"_",elvation))
+```
+
+
+```{r}
+input_points <- latam |>
+  sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
+
+# Perform spatial join
+input_points1 <- sf::st_intersection(input_points, level1) 
+
+latam1 <- input_points1 |>
+  mutate(latitude = map_dbl(geometry, ~sf::st_coordinates(.)[, "Y"]),
+         longitude = map_dbl(geometry, ~sf::st_coordinates(.)[, "X"])) |>
+  as.data.frame() |>
+  select(-geometry) |>
+  filter(longitude >= -90) |>
+  mutate(Value = case_when(Value == "21" ~ "20", 
+                           Value%in%c("17","18") ~ "18",
+                           Value%in% c("19","24","22","23") ~ "22", TRUE ~ Value)) |>
+  mutate(Value = case_when(Value == "18"  & latitude <= -30 ~ "22", TRUE ~ Value)) |>
+  mutate(Value = case_when(Value == "18" & latitude >= 0 & longitude >= -71 ~ "20", TRUE ~ Value))
+
+
+map1 <- ggplot() +
+  geom_sf(data = latin_america_polygon) +
+  geom_point(data=latam1, aes(x=longitude,y=latitude, colour=Value)) +
+  theme_test() +
+  theme(panel.grid.major = element_line(colour="gray"))
+
+map1
+```
+
+```{r}
+ggsave(plot=map1, "plot_groups/grouping_map_c.png",units = "cm", width = 10, height = 12)
+```
+
+
+
+Renaming variables
+```{r}
+clim0 <- latam1 |>
+  dplyr::select(-c(X, id_sample,depth)) |>
+  rename(elevation = elvation,
+         mtco = mtco_pred,
+         alpha = alpha_pred,
+         mtwa = mtwa_pred,
+         gdd = gdd_pred,
+         alpha_sse = alpha_see,
+         mtwa_sse = mtwa_see) 
+```
+
+
+Filter samples with a Hill diversity number higher or equal to 2
+```{r}
+clim0 <- clim0 |>
+  filter(hill_n2 >= 2) |>
+  select(-hill_n2) |>
+  arrange(entity,age)
+
+site_metadadata <- clim0 |>
+  select(entity,latitude,longitude,elevation,Value) |> distinct()
+```
+
+
+Reshaping the dataframe in preparation to filter outliers
+```{r}
+clim0 <- clim0 |> mutate(ID = paste0("ID_",row_number()))
+
+clim0_pred <- clim0 |>
+  pivot_longer(cols = !c(ID,entity,latitude,longitude,elevation,age,Value),names_to = "variable") |>
+  filter(variable%in%c("mtco","gdd","alpha","mtwa"))
+
+clim0_sse <- clim0 |>
+  pivot_longer(cols = !c(ID,entity,latitude,longitude,elevation,age,Value),names_to = "variable") |>
+  filter(variable%in%c("mtco_sse","gdd_sse","alpha_sse","mtwa_sse"))
+```
+
+
+A function to find ouliers in estandar deviations
+```{r}
+find_outlier <- function(x) {
+  return(x < quantile(x, .5) - 1.5*IQR(x) | x > quantile(x, .95) + 1.5*IQR(x))
+}
+```
+
+
+Remove samples that are outliers
+```{r}
+#add new column to data frame that indicates if each observation is an outlier
+outliers_tag <- clim0_sse |>
+  group_by(variable) |>
+  mutate(sse_outlier = ifelse(find_outlier(value), value, NA)) |>
+  ungroup() |>
+  filter(is.na(sse_outlier)) |>
+  mutate(variable = str_replace(variable,"_sse","")) |>
+  select(-c(sse_outlier,value))
+
+clim <- outliers_tag |>
+  inner_join(clim0_pred, by=c("ID","entity","latitude","longitude","elevation","age","variable","Value")) #|>
+  #select(-ID)
+  
+clim
+```
+
+
+Filter entities with modern age
+```{r}
+with_modern_age <- clim |>
+  group_by(variable, entity) |>
+  mutate(age_min = case_when(age <= 350 ~ T)) |>
+  ungroup() |>
+  filter(age_min == T) |>
+  select(entity) |>
+  distinct() |>
+  pull()
+
+pollens <- clim |> filter(entity%in%with_modern_age) |>
+  pivot_wider(names_from = variable, values_from = value) |>
+  arrange(entity,age)
+
+latitude_position <- clim |>
+  filter(entity%in%with_modern_age) |>
+  select(entity,latitude) |>
+  distinct() |>
+  arrange(desc(latitude)) |>
+  mutate(lat_position = row_number())
+```
+
+
+
+
+Correct alpha
+
+```{r}
+#Obtain modern CO2 from (Bereiter et al. 2015)
+modern_co2 <- tibble::tibble(age = 1950 - c(1961:1990),
+                             co2_init = purrr::map_dbl(age, codos::past_co2)) |>
+  dplyr::mutate(co2 =  median(co2_init)) |>
+  dplyr::select(co2) |> dplyr::distinct() |> dplyr::pull()
+
+embs0 <- pollens |> mutate(modern_co2 = modern_co2)
+```
+
+
+
+```{r}
+#Obtain past CO2 values
+entidades <- unique(embs0$entity)
+embs1 <- data.frame()
+  for (i in entidades){
+    aux1 <- embs0 %>% 
+        filter(entity == i) %$%
+        purrr::map_dbl(age, codos::past_co2)
+    
+    aux2 <- embs0 %>% 
+      filter(entity == i) |>
+      mutate(paleo_co2 = aux1)
+               
+    embs1 <- bind_rows (embs1, aux2)
+  }
+```
+
+
+
+```{r}
+#Estimate past Tmean values
+embs2 <- embs1 |> dplyr::mutate(id=row_number())
+
+muestras <- unique(embs2$id)
+embs3 <- data.frame()
+  for (i in muestras){
+    aux1 <- embs2 |> filter(id == i) 
+    aux2 <- with(aux1, codos::int_sin(mtco, mtwa))
+    aux3 <- aux2[aux2 > 0] # Filter remperatures above 0°C
+    aux4 <- aux1 |> mutate(palaeo_MGS_temp = mean(aux3))
+    embs3 <- bind_rows (embs3, aux4)
+  }
+```
+
+
+Example plot
+```{r}
+a <- codos::int_sin(-12.10125354, 15.25460) #15.2540934 	
+#15.254093
+
+as_tibble(a) |>
+  mutate(day=c(365:1)) |>
+  filter(value > 0) |>
+  mutate(mean_gdd = mean(value))
+
+b <- as_tibble(a) |>
+  mutate(day=c(365:1))
+ 
+plot_mgs <- b |> 
+  ggplot(aes(x=day,y=value))+
+  geom_line() +
+  geom_hline(yintercept = 9.629978, linetype="dashed",size=0.65) +
+  geom_hline(yintercept = -12.10125354, colour="#fb607f",size=0.65) +
+  geom_hline(yintercept = 15.25460,colour="#1974D2",size=0.65) +
+  annotate("text", x = 60, y = ((-12.10125354)+0.8), label = "MTCO",colour="#fb607f",size=3) +
+  annotate("text", x = 60, y = ((15.25460)+0.8), label = "MTWA",colour="#1974D2",size=3) +
+  annotate("text", x = 60, y = ((9.629978)+0.8), label = "MGS (mean growing season)",size=3) +
+  labs(x="Days", y="Temperature (°C)",subtitle = "Site: Kismohos\nAge: 12.148 ky") +
+  scale_y_continuous(n.breaks = 10) +
+  theme(plot.subtitle = element_text(size=8),
+        axis.title = element_text(size=8),
+        axis.text = element_text(size=8),
+        #axis.title = element_blank(),
+        #axis.text = element_blank(),
+        panel.grid = element_blank(),
+        panel.background = element_rect(color="transparent",fill = "transparent"),
+        panel.border = element_rect(colour="black",fill="transparent"))
+
+plot_mgs
+```
+
+```{r}
+#ggsave(plot_mgs, filename = "Output_reconstruction_amg_resubmitt/MGS_sin_example.png",units = "cm",width = 12,height = 8.5)
+```
+
+
+
+Add modern MGS temperature obtained by averaging the youngest 300 years
+```{r}
+embs4 <- embs3 |>
+  group_by(entity) |>
+  mutate(aux1 = case_when(age <= 350  ~ palaeo_MGS_temp)) |> #case_when(age <= min(age)+300  ~ value))
+  mutate(modern_MGS_temp = case_when(!is.na(aux1) ~ mean(aux1, na.rm = T))) |>
+  tidyr::fill(modern_MGS_temp, .direction = "updown") |>
+  ungroup() |>
+  select(-aux1)
+```
+
+
+Plot of Kismohos
+```{r}
+embs4 |>
+  filter(entity=="Lake Pet��n-I_16.96397_-89.84187_110") |>
+  filter(age <= 12300) |>
+  pivot_longer(cols = !c(entity,latitude,longitude,elevation,age,ID,id,Value)) |>
+  filter(name%in%c("mtco","mtwa","palaeo_MGS_temp")) |>  
+  ggplot() +
+  geom_line(aes(x=age,y=value, group=name,colour=name)) +
+  scale_colour_manual(values=c("mtco"="dodgerblue","mtwa"="firebrick","palaeo_MGS_temp"="mediumseagreen")) +
+  #geom_point(data=punto,aes(x=0, y=7.64817),size=4,colour="red") +
+  labs(title = "Lake Peten-I")+
+  theme_test()
+```
+
+
+Correction of alpha
+```{r}
+embs5 <- embs4 |>
+  select(entity,latitude,longitude,elevation,age,modern_MGS_temp,palaeo_MGS_temp,alpha,modern_co2,paleo_co2,ID,id,Value) |>
+  drop_na() |>
+  mutate(alpha_pred_corr = codos::corrected_mi(Tc0 = modern_MGS_temp,
+                                       Tc1 = palaeo_MGS_temp,
+                                        MI = alpha,
+                                          ca0= modern_co2,
+                                          ca1 = paleo_co2))
+```
+
+
+
+Example plot
+```{r}
+embs5 |>
+  filter(entity=="Lake Pet��n-I_16.96397_-89.84187_110") |>
+  filter(age <= 13300) |>
+  pivot_longer(cols = !c(entity,latitude,longitude,elevation,age,ID,id,Value)) |>
+  filter(name%in%c("alpha","alpha_pred_corr")) |>  
+  mutate(name=case_when(name=="alpha_pred_corr" ~ "alpha corrected",
+                        name == "alpha" ~ "alpha predicted")) |>
+  ggplot() +
+  geom_line(aes(x=age,y=value, group=name,colour=name)) +
+  scale_colour_manual(values=c("alpha predicted"="dodgerblue","alpha corrected"="firebrick")) +
+ # geom_point(data=punto,aes(x=0, y=7.64817),size=4,colour="red") +
+  scale_x_continuous(breaks = seq(0, 13300, by = 1000), labels= seq(0,13.3, by=1)) +
+  labs(title = "Petén-I", y= "alpha", x= "age (ky)")+
+  theme_test()
+```
+
+
+```{r}
+alpha <- embs5 |> 
+  select(entity,latitude,longitude,age,ID,alpha,alpha_pred_corr,Value)
+
+
+pollens1 <- pollens |>
+  full_join(alpha,by=c("entity","latitude","longitude","age","ID","alpha","Value"))
+
+
+pollens1 <- pollens1 |>
+  pivot_longer(cols = !c(entity,latitude,longitude,elevation,age,ID,Value),names_to = "variable") |>
+  filter(!is.na(value)) |>
+  select(-ID)
+
+pollens1
+```
+
+
+
+```{r}
+value_anomaly <- pollens1 |>
+  group_by(variable,entity) |>
+  mutate(aux1 = case_when(age <= 350  ~ value)) |> #case_when(age <= min(age)+300  ~ value))
+  mutate(modern_value = case_when(!is.na(aux1) ~ mean(aux1, na.rm = T))) |>
+  tidyr::fill(modern_value, .direction = "updown") |>
+  ungroup() |>
+  mutate(value_anomaly = value - modern_value) |>
+  select(variable,entity,age,value, Value,modern_value,value_anomaly)
+
+#write.csv(with_modern_age, "Output/sites_with_modern_samples_to_get_anomaly.csv")
+```
+
+
+
+#Produce windows
+```{r}
+clim1 <- data.frame()
+  for (i in seq(350,12300,175)){
+    aux1 <- value_anomaly %>% 
+        filter(age >= i - 350 & age <= i) |> 
+        mutate(bincentre= i - 175) 
+               
+    clim1 <- bind_rows (clim1, aux1)
+}
+```
+
+
+
+```{r}
+allmodels_binn <- clim1 |>
+  group_by(Value,variable,entity,bincentre) |>
+  add_tally(name = "sampls_x_bin") |>
+  filter(sampls_x_bin >= 2) |> #Filter windows with a minimum of two samples each.
+  mutate(anomaly_bin =  mean(value_anomaly)) |>
+  ungroup() |>
+  select(Value,variable,entity,bincentre,anomaly_bin) |>
+  distinct() 
+
+allmodels_binn |> 
+  ggplot(aes(x=bincentre,y=anomaly_bin,group=entity,colour=variable)) +
+  geom_step(alpha=1,show.legend = F) +
+  facet_wrap(Value~variable, scales="free_y")
+
+allmodels_binn1 <- clim1 |>
+  group_by(variable,entity,bincentre) |>
+  add_tally(name = "sampls_x_bin") |>
+  filter(sampls_x_bin >= 2) |> #Filter windows with a minimum of two samples each.
+  mutate(anomaly_bin =  mean(value_anomaly)) |>
+  ungroup() |>
+  select(variable,entity,bincentre,anomaly_bin) |>
+  distinct() 
+
+allmodels_binn1 |> 
+  ggplot(aes(x=bincentre,y=anomaly_bin,group=entity,colour=variable)) +
+  geom_step(alpha=1,show.legend = F) +
+  facet_wrap(~variable, scales="free_y")
+```
+
+
+```{r}
+allmodels_binn0 <- allmodels_binn |>
+  inner_join(site_metadadata,by = c("entity","Value"))
+  
+aux_lat <- allmodels_binn0 |>
+  inner_join(latitude_position,by = c("entity", "latitude")) |>
+  select(entity, latitude, lat_position) |>
+  distinct() |>
+  arrange(lat_position) |>
+  mutate(lat_position = row_number())
+  
+
+todos <- allmodels_binn0 |>
+  inner_join(aux_lat,by = c("entity", "latitude")) |>
+  group_by(variable) |>
+  arrange(Value,desc(lat_position)) |>
+  ungroup() |>
+  mutate(Value = fct_inorder(factor(Value)),
+         lat_position = fct_inorder(factor(lat_position, ordered = TRUE)))
+
+
+allmodels_mean <- todos |>
+  group_by(Value,variable,bincentre) |>
+  mutate(anomaly_mean = mean(anomaly_bin)) |>
+  ungroup() |>
+  select(Value,variable,bincentre,anomaly_mean) |>
+  distinct()
+
+allmodels_mean |>
+  ggplot(aes(x=bincentre, y=anomaly_mean,colour=variable))+
+  geom_step() +
+  facet_wrap(Value~variable, scales="free_y")
+```
+
+```{r}
+saveRDS(object = allmodels_mean, "plot_groups/3_zones_c_allmodels_mean.rds")
+```
+
+
+
+```{r}
+single_mean <- allmodels_binn0 |>
+  group_by(variable,bincentre) |>
+  mutate(anomaly_mean = mean(anomaly_bin)) |>
+  ungroup() |>
+  select(variable,bincentre,anomaly_mean) |>
+  distinct()
+
+single_mean$anomaly_mean_log <- log(abs(single_mean$anomaly_mean) + 1)
+
+single_mean$anomaly_mean_squared <- single_mean$anomaly_mean^2
+
+single_mean |>
+  ggplot(aes(x=bincentre, y=anomaly_mean,colour=variable))+
+  geom_step(show.legend = F) +
+  facet_wrap(~variable, scales="free_y") +
+  labs(subtitle = "window 350 regular scale")
+
+single_mean |>
+  ggplot(aes(x=bincentre, y=anomaly_mean_log,colour=variable))+
+  geom_step(show.legend = F) +
+  facet_wrap(~variable, scales="free_y") +
+  labs(subtitle = "window 350 log scale")
+
+single_mean |>
+  ggplot(aes(x=bincentre, y=anomaly_mean_squared,colour=variable))+
+  geom_step(show.legend = F) +
+  facet_wrap(~variable, scales="free_y") +
+  labs(subtitle = "window 350 squared scale")
+```
+
+
+```{r}
+saveRDS(object = allmodels_mean, "plot_groups/3_zones_c_single_mean.rds")
+```
+
+
+
+
+Por zonas
+```{r}
+library(locfit)
+
+hw <- 500
+n_repeat <- 1000
+
+v_variable <- unique(allmodels_binn$variable)
+v_zone <- unique(allmodels_binn$Value)
+
+allmodels_envelope <- data.frame()
+
+for (j in v_variable) {
+  for (i in v_zone) {
+    
+    aux2 <- allmodels_binn %>%
+      filter(variable == j, Value == i) %>%
+      select(entity, bincentre, anomaly_bin)
+    
+    aux_matrix <- aux2 %>%
+      arrange(entity, bincentre) %>%
+      tidyr::pivot_wider(id_cols = bincentre, names_from = entity, values_from = anomaly_bin) %>%
+      arrange(bincentre) %>%
+      select(-bincentre) %>%
+      as.matrix()
+    
+    centres <- unique(aux2$bincentre)
+    
+    # Bootstrapping
+    aux_boot <- matrix(nrow = length(centres), ncol = n_repeat)
+    set.seed(3654)
+    for (k in 1:n_repeat) {
+      ne <- sample(seq(1, ncol(aux_matrix), 1), ncol(aux_matrix), replace = TRUE) # randomly sample columns (cols = sites)
+      y <- as.vector(as.matrix(aux_matrix)[, ne])
+      x <- as.vector(rep(centres, length(ne)))
+      
+      locboot <- locfit(y ~ lp(x, deg = 1, h = hw), maxk = 2000, family = "grgauss")
+      aux_predict <- predict(locboot, newdata = centres, se.fit = TRUE) # loess smoothed fit through randomly sampled data
+      aux_boot[, k] <- aux_predict$fit # save output
+    }
+    
+    # Confidence intervals from bootstrapping
+    envelope <- t(apply(aux_boot, 1, quantile, probs = c(0.05, 0.95), na.rm = TRUE)) %>%
+      as_tibble() %>%
+      mutate(age = centres,
+             variable = j,
+             Value = i)
+    
+    allmodels_envelope <- bind_rows(allmodels_envelope, envelope)
+    
+    plot1 <- envelope %>%
+      ggplot() +
+      geom_ribbon(aes(x = age, ymin = `5%`, ymax = `95%`), alpha = 0.5) +
+      labs(subtitle = paste(j, "-", i))
+    
+    print(plot1)
+    
+  }
+}
+
+```
+
+
+Para una sola serie de tiempo
+```{r}
+library(locfit)
+hw <- 500
+n_repeat <- 1000
+
+v_variable <- unique(allmodels_binn1$variable)
+
+single_envelope <- data.frame()
+
+for (j in v_variable) {
+    
+    aux2 <- allmodels_binn1 %>%
+      filter(variable == j) %>%
+      select(entity, bincentre, anomaly_bin)
+    
+    aux_matrix <- aux2 %>%
+      arrange(entity, bincentre) %>%
+      tidyr::pivot_wider(id_cols = bincentre, names_from = entity, values_from = anomaly_bin) %>%
+      arrange(bincentre) %>%
+      select(-bincentre) %>%
+      as.matrix()
+    
+    centres <- unique(aux2$bincentre)
+    
+    # Bootstrapping
+    aux_boot <- matrix(nrow = length(centres), ncol = n_repeat)
+    set.seed(3654)
+    for (k in 1:n_repeat) {
+      ne <- sample(seq(1, ncol(aux_matrix), 1), ncol(aux_matrix), replace = TRUE) # randomly sample columns (cols = sites)
+      y <- as.vector(as.matrix(aux_matrix)[, ne])
+      x <- as.vector(rep(centres, length(ne)))
+      
+      locboot <- locfit(y ~ lp(x, deg = 1, h = hw), maxk = 2000, family = "grgauss")
+      aux_predict <- predict(locboot, newdata = centres, se.fit = TRUE) # loess smoothed fit through randomly sampled data
+      aux_boot[, k] <- aux_predict$fit # save output
+    }
+    
+    # Confidence intervals from bootstrapping
+    envelope <- t(apply(aux_boot, 1, quantile, probs = c(0.05, 0.95), na.rm = TRUE)) %>%
+      as_tibble() %>%
+      mutate(age = centres,
+             variable = j)
+    
+    single_envelope <- bind_rows(single_envelope, envelope)
+    
+    plot1.1 <- envelope %>%
+      ggplot() +
+      geom_ribbon(aes(x = age, ymin = `5%`, ymax = `95%`), alpha = 0.5) +
+      labs(subtitle = paste(j))
+    
+    print(plot1.1)
+}
+```
+
+
+Por zonas
+```{r}
+allmodels_smooth <- data.frame()
+
+for (j in v_variable) {
+  for (i in v_zone) {
+    
+    aux2 <- allmodels_binn %>%
+      filter(variable == j, Value == i) %>%
+      select(entity, bincentre, anomaly_bin)
+    
+    aux_matrix <- aux2 %>%
+      arrange(entity, bincentre) %>%
+      tidyr::pivot_wider(id_cols = bincentre, names_from = entity, values_from = anomaly_bin) %>%
+      arrange(bincentre) %>%
+      select(-bincentre) %>%
+      as.matrix()
+    
+    centres <- unique(aux2$bincentre)
+    
+    # Loess regression of all sites
+    y <- c(aux_matrix)
+    x <- rep(centres, ncol(aux_matrix))
+    
+    aux3 <- as.data.frame(cbind(x, y))
+    locboot <- locfit(y ~ lp(x, deg = 1, h = hw), maxk = 2000, family = "grgauss")
+    aux_predict <- predict(locboot, newdata = centres, se.fit = TRUE) # loess smoothed fit through all data
+    aux_fit <- aux_predict$fit # save output
+    
+    # Create output data frame
+    aux4 <- aux_fit %>%
+      as_tibble() %>%
+      rename(value_smooth = value) %>%
+      mutate(age = centres,
+             variable = j,
+             Value = i)
+    
+    allmodels_smooth <- bind_rows(allmodels_smooth, aux4)
+    
+    plot1 <- ggplot(data = aux4, aes(x = age, y = value_smooth)) +
+      geom_line() +
+      labs(subtitle = paste(j, "-", i))
+    
+    print(plot1)
+  }
+}
+```
+
+Para una sola secuencia
+```{r}
+single_smooth <- data.frame()
+
+for (j in v_variable) {
+    
+    aux2 <- allmodels_binn1 %>%
+      filter(variable == j) %>%
+      select(entity, bincentre, anomaly_bin)
+    
+    aux_matrix <- aux2 %>%
+      arrange(entity, bincentre) %>%
+      tidyr::pivot_wider(id_cols = bincentre, names_from = entity, values_from = anomaly_bin) %>%
+      arrange(bincentre) %>%
+      select(-bincentre) %>%
+      as.matrix()
+    
+    centres <- unique(aux2$bincentre)
+    
+    # Loess regression of all sites
+    y <- c(aux_matrix)
+    x <- rep(centres, ncol(aux_matrix))
+    
+    aux3 <- as.data.frame(cbind(x, y))
+    locboot <- locfit(y ~ lp(x, deg = 1, h = hw), maxk = 2000, family = "grgauss")
+    aux_predict <- predict(locboot, newdata = centres, se.fit = TRUE) # loess smoothed fit through all data
+    aux_fit <- aux_predict$fit # save output
+    
+    # Create output data frame
+    aux4 <- aux_fit %>%
+      as_tibble() %>%
+      rename(value_smooth = value) %>%
+      mutate(age = centres,
+             variable = j)
+    
+    single_smooth <- bind_rows(single_smooth, aux4)
+    
+    plot1 <- ggplot(data = aux4, aes(x = age, y = value_smooth)) +
+      geom_line() +
+      labs(subtitle = paste(j, "-", i))
+    
+    print(plot1)
+}
+```
+
+
+
+For different zones
+```{r}
+allmodels_envelope 
+
+allmodels_smooth #|>
+ # mutate(model="fxTWA-PLS") |>
+ # write.csv("D:/Tercer_paper_clean_version_final/Output_smooth/smooth_fxTWA-PLS.csv")
+
+smooth_envelope <- allmodels_envelope |>
+  inner_join(allmodels_smooth, by = c("age", "variable","Value")) |>
+  inner_join(allmodels_mean, by=c("age"="bincentre", "variable","Value")) |>
+  mutate(set="using mtco and mtwa")
+```
+
+```{r}
+saveRDS(smooth_envelope, "plot_groups/3_zones_c_allmodels_envelope.rds")
+```
+
+
+
+For a single timeseries
+```{r}
+single_envelope 
+
+single_smooth #|>
+ # mutate(model="fxTWA-PLS") |>
+ # write.csv("D:/Tercer_paper_clean_version_final/Output_smooth/smooth_fxTWA-PLS.csv")
+
+single_envelope <- single_envelope |>
+  inner_join(single_smooth, by = c("age", "variable")) |>
+  inner_join(single_mean, by=c("age"="bincentre", "variable")) 
+
+#write.csv(smooth_envelope,"alpha_with_mtco_mtwa.csv")
+```
+
+
+```{r}
+saveRDS(single_envelope, "plot_groups/3_zones_c_single_envelope.rds")
+```
+
+
+
+```{r}
+# Define a custom labeling function
+custom_labeller <- function(variable, value) {
+  if (variable == "Value") {
+    return(NULL)
+  } else {
+    return(as.character(value))
+  }
+}
+
+plot_groups <- smooth_envelope |>
+  filter(variable != "alpha") |>
+  ggplot(aes(x=age)) +
+  geom_ribbon(aes(ymin=`5%`, ymax=`95%`), fill="gray70", alpha=0.5) +
+  geom_step(aes(y=anomaly_mean)) +
+  geom_line(aes(y=value_smooth, colour=Value)) +
+  scale_x_continuous(breaks = seq(0,12500,2000), labels = seq(0,12.5,2)) +
+  facet_wrap(Value ~ variable, scales="free_y", labeller = custom_labeller) +
+  theme(strip.background = element_rect(fill="transparent",colour="transparent"),       # Remove strip background
+        strip.text = element_text(hjust = 0, vjust = -0.5,face = "bold"),
+        panel.background = element_rect(fill="transparent", colour="transparent"),
+        panel.border = element_rect(fill="transparent", colour="black"),
+        panel.grid.major.x = element_line(colour="gray70",linetype = "dotted")) + # Align text to left
+  labs(title = "window 400")
+
+plot_groups
+```
+
+
+```{r}
+ggsave(plot=plot_groups, "plot_groups/grouping_c.png",units = "cm", width = 25, height = 12)
+```
+
+
+
+```{r}
+plot_single <- single_envelope |>
+  filter(variable != "alpha") |>
+  ggplot(aes(x=age)) +
+  geom_ribbon(aes(ymin=`5%`, ymax=`95%`), fill="gray80", alpha=0.5) +
+  geom_step(aes(y=anomaly_mean),colour="#838383") +
+  geom_line(aes(y=value_smooth), colour="#4f5dff",size=0.5) +
+  scale_x_continuous(breaks = seq(0,12500,2000), labels = seq(0,12.5,2)) +
+  facet_wrap(~ variable, scales="free_y") +
+  theme(strip.background = element_rect(fill="transparent",colour="transparent"),       # Remove strip background
+        strip.text = element_text(hjust = 0, vjust = -0.5,face = "bold"),
+        panel.background = element_rect(fill="transparent", colour="transparent"),
+        panel.border = element_rect(fill="transparent", colour="black")) +  # Align text to left
+  labs(title = "window = 400")
+
+plot_single
+```
+
+
+
+
+```{r}
+plot_gdd <- single_envelope |>
+  filter(variable == "gdd") |>
+  ggplot(aes(x=age)) +
+  geom_ribbon(aes(ymin=`5%`,ymax=`95%`), alpha = 0.25, fill="gray75") +
+  geom_step(aes(y= anomaly_mean), colour="#838383", size=0.35) +
+  geom_line(aes(y= value_smooth),size=0.35, colour="#4f5dff") +
+  expand_limits(x = c(0, 12500)) +
+  scale_x_continuous(breaks = seq(0,12500,1000),labels = seq(0,12.5,1),expand = c(0.03,0.03))+
+  scale_y_continuous(n.breaks = 10) +
+  labs(x="Age (cal. ky)", y="GDD0", subtitle = "GDD0")+
+  theme(legend.title = element_blank(),
+        legend.position = c(0.13,0.87),
+        legend.background = element_rect(fill = "transparent"),
+        legend.text = element_text(size=8),
+        legend.key.size = unit(0.26,"cm"),
+        legend.spacing.x = unit(0.08,"cm"),
+        axis.title = element_text(size=8),
+        axis.text = element_text(size=8),
+        #axis.title = element_blank(),
+        #axis.text = element_blank(),
+        panel.grid = element_blank(),
+        panel.background = element_rect(color="transparent",fill = "transparent"),
+        panel.border = element_rect(colour="black",fill="transparent"),
+        panel.grid.major.x = element_line(linetype = "dotted", colour = "gray"))
+
+plot_gdd
+```
+
+
+
+```{r}
+plot_mtco <- single_envelope |>
+  filter(variable == "mtco") |>
+  ggplot(aes(x=age)) +
+  geom_ribbon(aes(ymin=`5%`,ymax=`95%`), alpha = 0.25, fill="gray75") +
+  geom_step(aes(y= anomaly_mean), colour="#838383", size=0.35) +
+  geom_line(aes(y= value_smooth),size=0.35, colour="#4f5dff") +
+  expand_limits(x = c(0, 12500)) +
+  scale_x_continuous(breaks = seq(0,12500,1000),labels = seq(0,12.5,1),expand = c(0.03,0.03))+
+  scale_y_continuous(n.breaks = 10) +
+  labs(x="Age (cal. ky)", y="MTCO (°C)", subtitle="MTCO")+
+  theme(legend.title = element_blank(),
+        legend.position = c(0.13,0.87),
+        legend.background = element_rect(fill = "transparent"),
+        legend.text = element_text(size=8),
+        legend.key.size = unit(0.26,"cm"),
+        legend.spacing.x = unit(0.08,"cm"),
+        axis.title = element_text(size=8),
+        axis.text = element_text(size=8),
+        #axis.title = element_blank(),
+        #axis.text = element_blank(),
+        panel.grid = element_blank(),
+        panel.background = element_rect(color="transparent",fill = "transparent"),
+        panel.border = element_rect(colour="black",fill="transparent"),
+        panel.grid.major.x = element_line(linetype = "dotted", colour = "gray"))
+
+plot_mtco
+```
+
+```{r}
+plot_mtwa <- single_envelope |>
+  filter(variable == "mtwa") |>
+  ggplot(aes(x=age)) +
+  geom_ribbon(aes(ymin=`5%`,ymax=`95%`), alpha = 0.25, fill="gray75") +
+  geom_step(aes(y= anomaly_mean), colour="#838383", size=0.35) +
+  geom_line(aes(y= value_smooth),size=0.35, colour="#4f5dff") +
+  expand_limits(x = c(0, 12500)) +
+  scale_x_continuous(breaks = seq(0,12500,1000),labels = seq(0,12.5,1),expand = c(0.03,0.03))+
+  scale_y_continuous(n.breaks = 10) +
+  labs(x="Age (cal. ky)", y="MTWA (°C)", subtitle="MTWA")+
+  theme(legend.title = element_blank(),
+        legend.position = c(0.13,0.87),
+        legend.background = element_rect(fill = "transparent"),
+        legend.text = element_text(size=8),
+        legend.key.size = unit(0.26,"cm"),
+        legend.spacing.x = unit(0.08,"cm"),
+        axis.title = element_text(size=8),
+        axis.text = element_text(size=8),
+        #axis.title = element_blank(),
+        #axis.text = element_blank(),
+        panel.grid = element_blank(),
+        panel.background = element_rect(color="transparent",fill = "transparent"),
+        panel.border = element_rect(colour="black",fill="transparent"),
+        panel.grid.major.x = element_line(linetype = "dotted", colour = "gray"))
+
+plot_mtwa
+```
+
+```{r}
+plot_alpha <- single_envelope |>
+  filter(variable == "alpha_pred_corr") |>
+  ggplot(aes(x=age)) +
+  geom_ribbon(aes(ymin=`5%`,ymax=`95%`), alpha = 0.25, fill="gray75") +
+  geom_step(aes(y= anomaly_mean), colour="#838383", size=0.35) +
+  geom_line(aes(y= value_smooth),size=0.35, colour="#4f5dff") +
+  expand_limits(x = c(0, 12500)) +
+  scale_x_continuous(breaks = seq(0,12500,1000),labels = seq(0,12.5,1),expand = c(0.03,0.03))+
+  scale_y_continuous(n.breaks = 10) +
+  labs(x="Age (cal. ky)", y=expression(alpha), subtitle = expression(alpha))+
+  theme(legend.title = element_blank(),
+        legend.position = c(0.13,0.87),
+        legend.background = element_rect(fill = "transparent"),
+        legend.text = element_text(size=8),
+        legend.key.size = unit(0.26,"cm"),
+        legend.spacing.x = unit(0.08,"cm"),
+        axis.title = element_text(size=8),
+        axis.text = element_text(size=8),
+        #axis.title = element_blank(),
+        #axis.text = element_blank(),
+        panel.grid = element_blank(),
+        panel.background = element_rect(color="transparent",fill = "transparent"),
+        panel.border = element_rect(colour="black",fill="transparent"),
+        panel.grid.major.x = element_line(linetype = "dotted", colour = "gray"))
+
+plot_alpha
+```
+
+```{r}
+ggsave(plot_alpha, filename = "plot_groups/grouping_c_single_Alpha.pdf",units = "cm",width = 7,height = 4.6)
+```
+
+
+
+```{r}
+ggsave(plot_gdd, filename = "plot_groups/grouping_c_single_gdd.pdf",units = "cm",width = 7,height = 4.6)
+```
+
+
+
+```{r}
+ggsave(plot_mtwa, filename = "plot_groups/grouping_c_single_mtwa.pdf",units = "cm",width = 7,height = 4.6)
+```
+
+
+```{r}
+ggsave(plot_mtco, filename = "plot_groups/grouping_c_single_mtco.pdf",units = "cm",width = 7,height = 4.6)
+```
+
+
+
