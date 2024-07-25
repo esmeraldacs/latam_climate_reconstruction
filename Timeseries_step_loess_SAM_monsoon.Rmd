@@ -7,26 +7,42 @@ date: "2022-10-14"
 ```{r}
 `%$%` <- magrittr::`%$%`
 library(tidyverse)
+#library(sf)
 ```
-
 
 
 ```{r}
-#latin_america <- c("Venezuela", "Colombia", "Guyana", "Suriname", "France", 
-                   #"Antigua and Barbuda", "Dominica", "Ecuador", "Peru", "Uruguay",
-                   #"Bolivia", "Paraguay", "Argentina", "Chile", "Brazil")
+moon_sam_raster <- raster("Output_data/summer_precip_percentage.tif") %>%
+  rasterToPoints() %>%
+  as.data.frame(stringsAsFactors = FALSE) %>%
+  rename(lon = x, lat = y, precip_percentage = summer_precip_percentage)
 
-
-# Filter ne_countries dataset for Latin American countries
-#latin_america_polygon <- rnaturalearth::ne_countries(scale = 'large', returnclass = "sf") %>%
- # filter(name %in% latin_america) |>
- # sf::st_transform(crs = "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0 +units=m +no_defs") |>
- # sf::st_crop(xmin = -85, xmax = -30, ymin = -60, ymax = 12) |>
- # sf::st_union()
-
-#ggplot() + geom_sf(data = latin_america_polygon)
+ggplot() +
+  geom_raster(data = moon_sam_raster, aes(x = lon, y = lat, fill = precip_percentage)) +
+  scico::scale_fill_scico(palette = 'lapaz',direction = -1) +
+  coord_fixed() +
+  theme_test()
 ```
 
+
+```{r}
+moon_sam_polygon <- sf::st_read("Input/Precipitation_polygon/15_levels_polygon_level_33.shp") %>% st_make_valid()
+
+plot(moon_sam_polygon)
+```
+
+
+```{r}
+ggplot() +
+  geom_raster(data = moon_sam_raster, aes(x = lon, y = lat, fill = precip_percentage)) +
+  scico::scale_fill_scico(palette = 'lapaz',direction = -1) +
+  geom_sf(data = moon_sam_polygon, fill="transparent",color = "gray30", size = 1.5 ) +
+  labs(title = "Percentage of Summer Precipitation",
+       x = "Longitude",
+       y = "Latitude",
+       fill = "Precipitation (%)") +
+  theme_test()
+```
 
 
 Input files
@@ -35,37 +51,34 @@ latam <- read.csv("C:/Users/esmer/UoR/latinam_climate/Output_train_amg/Train_amg
   filter(entity!="Laguna Cerritos") |>
   filter(elvation > -100) |>
   mutate(entity = paste0(entity,"_",latitude,"_",longitude,"_",elvation))
+
+latam_points_sf <- latam |> sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
+```
+
+
+
+```{r}
+filtered_points <- sf::st_join(latam_points_sf, moon_sam_polygon, join = sf::st_within) %>% filter(!is.na(level))
+
+moon_sam_pollen <- filtered_points |>
+  mutate(latitude = map_dbl(geometry, ~sf::st_coordinates(.)[, "Y"]),
+         longitude = map_dbl(geometry, ~sf::st_coordinates(.)[, "X"])) |>
+  as.data.frame() |>
+  select(-geometry)
 ```
 
 
 ```{r}
-input_points <- latam |>
-  sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
-
-# Perform spatial join
-input_points1 <- sf::st_intersection(input_points, level1) 
-
-latam1 <- input_points1 |>
-  mutate(latitude = map_dbl(geometry, ~sf::st_coordinates(.)[, "Y"]),
-         longitude = map_dbl(geometry, ~sf::st_coordinates(.)[, "X"])) |>
-  as.data.frame() |>
-  select(-geometry) |>
-  filter(longitude >= -90) |>
-  mutate(Value = case_when(Value == "21" ~ "20", 
-                           Value%in%c("17","18") ~ "18",
-                           Value%in% c("19","24","22","23") ~ "22", TRUE ~ Value)) |>
-  mutate(Value = case_when(Value == "18"  & latitude <= -30 ~ "22", TRUE ~ Value)) |>
-  mutate(Value = case_when(Value == "18" & latitude >= 0 & longitude >= -71 ~ "20", TRUE ~ Value))
-
-
 map1 <- ggplot() +
-  geom_sf(data = latin_america_polygon) +
-  geom_point(data=latam1, aes(x=longitude,y=latitude, colour=Value)) +
+ # geom_point(data=latam, aes(x=longitude,y=latitude), colour="blue") +
+  geom_sf(data = moon_sam_polygon) +
+  geom_point(data=moon_sam_pollen, aes(x=longitude,y=latitude)) +
   theme_test() +
   theme(panel.grid.major = element_line(colour="gray"))
 
 map1
 ```
+
 
 ```{r}
 ggsave(plot=map1, "plot_groups/grouping_map_c.png",units = "cm", width = 10, height = 12)
