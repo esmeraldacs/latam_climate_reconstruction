@@ -58,6 +58,13 @@ plot(raster_data)
 ```
 
 
+```{r}
+# Save the raster to a file
+output_file_path <- "Output_data/summer_precip_percentage.tif"
+writeRaster(raster_data, output_file_path, format = "GTiff", overwrite = TRUE)
+```
+
+
 
 ```{r}
 # Convert the raster to a data frame suitable for ggplot
