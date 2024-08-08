@@ -702,25 +702,38 @@ plot1 <- single_envelope1 |>
   facet_wrap(~variable, scales = "free_y") +
   labs(subtitle = "All fossil entities in latin america", y="Anomaly", x="Age (ky)") +
   theme(strip.background = element_rect(fill="transparent",colour="transparent"),
-        strip.text = element_text(hjust = 0, vjust = -0.5,face = "bold"),
+        strip.text = element_text(hjust = 0, vjust = -0.5,face = "bold", size = 8),
         panel.background = element_rect(fill = "transparent", colour = "transparent"),
-        panel.border = element_rect(fill = "transparent", colour = "black"))
+        panel.border = element_rect(fill="transparent",color="black"),
+        panel.grid = element_blank(),
+        axis.title.x = element_text(size=7.5,color = "black"),
+        axis.title.y = element_text(size=7.5, angle=90),
+        axis.text.x = element_text(size=7.5),
+        axis.text.y = element_text(size=7.5),
+       # axis.ticks = element_blank(),
+        plot.subtitle = element_text(size=9),
+        legend.key.size = unit(0.28,"cm"),
+        legend.text.align = 0,
+        legend.text=element_text(size=7.5),
+        legend.title.align = 0.5,
+        legend.title = element_text(size = 7.5),
+        legend.margin = margin(unit = "cm", t=0.05,r=0.08,b=0.05,l=0.08),
+        legend.box.background = element_rect(fill=alpha('white', 0.2),color="gray30",size = 0.15,),
+        legend.background = element_rect(fill=alpha('white', 0.45),color="gray30",size = 0.25),
+        legend.position = c(0.15,0.25))
+
 plot1
 ```
 
 
 ```{r}
-ggsave(plot=plot_groups, "Output_figures/",units = "cm", width = 25, height = 12)
+ggsave(plot=plot1, "Output_figures/all fossil entitites in latam.png",units = "cm", width = 16, height = 10)
 ```
 
 
 ```{r}
-saveRDS(single_envelope, "plot_groups/3_zones_c_single_envelope.rds")
+#saveRDS(single_envelope, "plot_groups/3_zones_c_single_envelope.rds")
 ```
-
-
-
-
 
 
 
