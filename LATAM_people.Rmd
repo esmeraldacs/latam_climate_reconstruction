@@ -1,0 +1,658 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-04-22"
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(minpack.lm)
+```
+
+
+
+```{r}
+latin_america <- c("Venezuela", "Colombia", "Guyana", "Suriname", "France", 
+                   "Antigua and Barbuda", "Dominica", "Ecuador", "Peru", "Uruguay",
+                   "Bolivia", "Paraguay", "Argentina", "Chile", "Brazil","Mexico","Guatemala", "El Salvador", "Panama","Belize", "Costa Rica","Nicaragua","Honduras")
+
+# Filter ne_countries dataset for Latin American countries
+latin_america_polygon <- rnaturalearth::ne_countries(scale = 'large', returnclass = "sf") %>%
+  filter(name %in% latin_america) |>
+  sf::st_transform(crs = "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0 +units=m +no_defs") |>
+  sf::st_crop(xmin = -120, xmax = -30, ymin = -60, ymax = 32) |>
+  sf::st_union()
+
+ggplot() + geom_sf(data = latin_america_polygon)
+
+latin_america_polygon
+```
+
+
+```{r}
+library(p3k14c)
+arq_data <- p3k14c::p3k14c_data |> as_tibble() |>  filter(!is.na(Lat) & !is.na(Long))
+```
+
+
+
+Obtainning radiocarbon and assing it its region
+```{r}
+input_points <- arq_data |> sf::st_as_sf(coords = c("Long", "Lat"), crs = 4326)
+
+# Perform spatial join
+input_points1 <- sf::st_intersection(input_points, latin_america_polygon) 
+
+radiocarbones <- input_points1 |>
+  mutate(latitude = map_dbl(geometry, ~sf::st_coordinates(.)[, "Y"]),
+         longitude = map_dbl(geometry, ~sf::st_coordinates(.)[, "X"])) |>
+  as.data.frame() |>
+  dplyr::select(-geometry) |>
+  filter(Age <= 11600) 
+
+# Remove underscores from site names
+radiocarbones$SiteName <- gsub("_", "", radiocarbones$SiteName)
+```
+
+
+```{r}
+plot0 <- ggplot() +
+  geom_sf(data = latin_america_polygon) +
+  geom_point(data=radiocarbones, aes(x=longitude,y=latitude, fill=Age),size=1,shape=21,linetype=3,stroke=0.2) +
+  labs(subtitle = "Archaeological radiocarbon dates in latam",x=NULL,y=NULL,fill="Age\n(cal. yrs.)")+
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_fill_stepsn(colours = c("#ff6666","#ffcc66","#e7fc67","#33c0a4","#008080"),n.breaks=5)+
+   theme(panel.background = element_rect(fill="white",color="transparent"),
+        panel.border = element_rect(fill="transparent",color="black"),
+        panel.grid = element_blank(),
+        axis.title.x = element_text(size=7.5,color = "black"),
+        axis.title.y = element_text(size=7.5, angle=90),
+        axis.text.x = element_text(size=7.5),
+        axis.text.y = element_text(size=7.5),
+       # axis.ticks = element_blank(),
+        plot.subtitle = element_text(size=9),
+        legend.key.size = unit(0.28,"cm"),
+        legend.text.align = 0,
+        legend.text=element_text(size=7.5),
+        legend.title.align = 0.5,
+        legend.title = element_text(size = 7.5),
+        legend.margin = margin(unit = "cm", t=0.05,r=0.08,b=0.05,l=0.08),
+        legend.box.background = element_rect(fill=alpha('white', 0.2),color="gray30",size = 0.15,),
+        legend.background = element_rect(fill=alpha('white', 0.45),color="gray30",size = 0.25),
+        legend.position = c(0.15,0.25))
+
+plot0
+```
+
+
+```{r}
+ggsave(plot = plot0, filename = "Output_figures/Archaeological_dates_latam.png",units = "cm", width = 8,height = 10)
+```
+
+
+```{r}
+saveRDS(radiocarbones,"plot_groups/radiocarbones_3_zones_c.rds")
+```
+
+
+```{r}
+library(rcarbon)
+```
+
+A single time series
+```{r}
+# General SPD parameters
+nsim <- 1000 # number of actual simulations (set to 5 for full demo), 1000 in paper
+ncores <- 6
+runm <- 100 #smoothing of SPDs
+binh <- 200 #bin clustering
+realstartBP <- 11600
+realendBP <- 2500
+bracket <- 500
+workingstartBP <- realstartBP + bracket
+workingendBP <- max(0, realendBP - bracket)
+
+# Calibrate the radiocarbon dates
+alldates_my1 <- calibrate(
+  x = radiocarbones$Age,
+  errors = radiocarbones$Error,
+  calCurves = 'intcal20',
+  method = "standard",
+  normalised = FALSE,
+  ncores = ncores,
+  calMatrix = TRUE
+)
+
+# Prepare bins
+bins_my1 <- binPrep(
+  sites = radiocarbones$SiteName,
+  ages = radiocarbones$Age,
+  h = binh
+)
+  
+
+# Calculate SPD
+allspd_my1 <- spd(
+  x = alldates_my1,
+  bins = bins_my1,
+  timeRange = c(workingstartBP, workingendBP),
+  datenormalised = FALSE,
+  runm = runm
+)
+
+library(minpack.lm)
+logFit <- nlsLM(
+  PrDens ~ SSlogis(calBP, Asym, xmid, scale),
+  data = allspd_my1$grid,
+  start = list(Asym = 0.2, xmid = 5000, scale = -100),
+  control = nls.lm.control(maxiter = 200)
+)
+
+
+logFitDens <- data.frame(
+  calBP = allspd_my1$grid$calBP,
+  PrDens = SSlogis(
+    input = allspd_my1$grid$calBP,
+    Asym = coefficients(logFit)[1],
+    xmid = coefficients(logFit)[2],
+    scal = coefficients(logFit)[3]
+  )
+)
+
+logisticmod <- modelTest(
+  alldates_my1,
+  errors = radiocarbones$Error,
+  bins = bins_my1,
+  nsim = nsim,
+  timeRange = c(workingstartBP, workingendBP),
+  model = "custom",
+  predgrid = logFitDens,
+  runm = runm,
+  raw = TRUE
+)
+
+saveRDS(logisticmod,"Output_data/LATAM_logisticmod_single.rds")
+```
+
+
+```{r}
+saveRDS(logisticmod,"logistic_mod_borrar.rds")
+```
+
+
+
+```{r}
+logisticmod <- readRDS("logistic_mod_borrar.rds")
+
+#summary(logisticmod)
+```
+
+
+```{r}
+dev_positive <- logisticmod$result %>%
+  mutate(positive = PrDens > hi,
+         group = cumsum(!lag(positive, default = FALSE) & positive)) %>%
+  filter(positive) %>%
+  group_by(group) %>%
+  slice(which.max(calBP), which.min(calBP)) %>%
+  ungroup() %>%
+  select(group, calBP) %>%
+  mutate(min_or_max = rep(c("max", "min"), length.out = n())) |>
+  group_by(group) |> filter(calBP<=11500,calBP>=2000) |> ungroup() |>
+  pivot_wider(id_cols = group, names_from = min_or_max, values_from = calBP)
+
+#dev_positive
+
+dev_negative <- logisticmod$result %>%
+  mutate(negative = PrDens < lo,
+         group = cumsum(!lag(negative, default = FALSE) & negative)) %>%
+  filter(negative) %>%
+  group_by(group) %>%
+  slice(which.max(calBP), which.min(calBP)) %>%
+  ungroup() %>%
+  select(group, calBP) %>%
+  mutate(min_or_max = rep(c("max", "min"), length.out = n())) |>
+  group_by(group) |> filter(calBP<=11500,calBP>=2000) |> ungroup() |>
+  pivot_wider(id_cols = group, names_from = min_or_max, values_from = calBP)
+
+#dev_negative
+```
+
+
+
+
+```{r}
+# Extract the relevant data from logisticmod
+logistic_data <- logisticmod$result %>%
+  as.data.frame() |>
+  filter(calBP <= 11600,
+         calBP >= 2000) |>
+  rename(age = calBP)
+
+# Create the plot
+plot_southa <- logistic_data %>%
+  ggplot() +
+  geom_ribbon(aes(x = calBP, ymin = lo, ymax = hi), fill = "grey70") +
+  geom_rect(data = dev_positive, aes(xmin = min, xmax = max, ymin = -Inf, ymax = Inf), fill = "lightpink", alpha = 0.5) +
+  geom_rect(data = dev_negative, aes(xmin = min, xmax = max, ymin = -Inf, ymax = Inf), fill = "#7474b0", alpha = 0.5) +
+  geom_line(aes(x = calBP, y = PrDens),colour="black") +
+  expand_limits(y = c(0, Inf)) +
+  scale_x_reverse(breaks = seq(1500, 13000, 500), expand = c(0, 0),labels = seq(1.5, 13,0.5)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x="Age (ky)", y= "Summed Probability", subtitle = "Whole region") +
+  theme(panel.border = element_rect(fill="transparent",colour="black"),
+  panel.background = element_rect(fill="transparent",colour="transparent"),
+  axis.text.y = element_text(size=8),
+  axis.title.y = element_text(size=8))
+  
+plot_southa
+plot(logisticmod)
+```
+
+
+```{r}
+saveRDS(plot_southa, "plot_groups/plot_single_people_southa.rds")
+```
+
+
+```{r}
+plot_southa <- readRDS("plot_groups/plot_single_people_southa.rds")
+
+plot_southa <- plot_southa +
+    theme(panel.grid.major.x = element_line(linewidth = 0.5, linetype = "dashed", colour = "red"))
+
+plot_southa
+```
+
+
+```{r}
+ggsave(plot = plot_southa, "plot_peple_wholeregion_r2.pdf", units = "cm", width = 18, height = 10)
+```
+
+
+
+```{r}
+aux_clim <- readRDS("all_latam_envelope.rds")
+```
+
+
+```{r}
+data_mtco <- aux_clim |> filter(age <= 11500) |> filter(variable == "mtco")
+
+data_mtwa <- aux_clim |> filter(age <= 11500) |> filter(variable == "mtwa")
+
+data_alpha <- aux_clim |> filter(age <= 11500) |> filter(variable == "alpha_pred_corr")
+
+data_gdd <- aux_clim |> filter(age <= 11500) |> filter(variable == "gdd")
+
+# Adjust age column in the second dataframe to match the resolution of the first dataframe
+#plot_mtco_adjusted <- plot_mtco %>%
+ # mutate(age = seq(min(logistic_data$age), max(logistic_data$age), length.out = n()))
+
+# Now, let's combine both data frames
+combined_data <- bind_rows(mutate(logistic_data, dataset = "Summed Probability"),
+                           mutate(data_mtco, dataset = "MTCO (°C)"),
+                           mutate(data_mtwa, dataset = "MTWA (°C)"),
+                           mutate(data_alpha, dataset = "Alpha"),
+                            mutate(data_gdd, dataset = "GDD0"))
+
+combined_data$dataset <- factor(combined_data$dataset, levels = c("Summed Probability", "MTWA (°C)", "MTCO (°C)", "GDD0", "Alpha"))
+
+
+plot1 <- ggplot(data = combined_data, aes(x=age)) +
+  geom_ribbon(aes(ymin = `5%`, ymax = `95%`), fill = "grey85") +
+  geom_ribbon(aes(ymin = lo, ymax = hi), fill = "grey70") +
+  annotate("rect", xmin = dev_positive$min, xmax = dev_positive$max, ymin = -Inf, ymax = Inf, alpha = 0.3, fill = "lightpink") +
+  annotate("rect", xmin = dev_negative$min, xmax = dev_negative$max, ymin = -Inf, ymax = Inf, alpha = 0.08, fill = "blue") +
+  geom_step(aes(y = anomaly_mean),colour = "gray35", size= 0.3) +
+  geom_line(aes(y = value_smooth),colour = "#ff4e50", size = 0.65) +
+  geom_line(aes(y = PrDens),colour = "#ff4e50", size = 0.65) +
+  scale_x_continuous(expand = c(0,0)) +
+  facet_wrap(~dataset, scales = "free_y", ncol = 1) +
+  theme(legend.title = element_blank(),
+        legend.background = element_rect(fill = "transparent"),
+        legend.text = element_text(size=8),
+        legend.key.size = unit(0.26,"cm"),
+        legend.spacing.x = unit(0.08,"cm"),
+        axis.title = element_text(size=8),
+        axis.text = element_text(size=8),
+        panel.grid = element_blank(),
+        panel.background = element_rect(color="transparent",fill = "transparent"),
+        panel.border = element_rect(colour="black",fill="transparent"),
+        strip.background = element_rect(fill="transparent"),
+        strip.text = element_text(hjust = 0,  vjust = -1))
+  
+plot1
+```
+
+
+
+```{r}
+ggsave(plot = plot1, "Output_figures/all_lata_plot.png", units = "cm", width = 8.5, height = 21)
+```
+
+
+
+```{r}
+plot_clim_mtco <- aux_clim |>
+  filter(variable == "mtco") %>%
+  ggplot() +
+#  geom_ribbon(aes(x = calBP, ymin = lo, ymax = hi), fill = "grey70") +
+  geom_step(aes(x = age, y = anomaly_mean_squared),colour="#fa3c4c") +
+  expand_limits(x = c(0, 12500)) +
+ # scale_x_reverse(breaks = seq(3500, 12500, 500), expand = c(0, 0),labels = seq(3.5, 12.5,0.5)) +
+  scale_x_continuous(breaks = seq(0,12500,1000),labels = seq(0,12.5,1),expand = c(0.03,0.03))+
+  scale_y_continuous(expand = c(0, 0)) +
+  #annotate("text", x = 60, y = 0.45, label = "(b) SPD", size = 2, hjust=0) +
+  labs(x="Age (ky)", y= NULL) +
+   theme(legend.title = element_blank(),
+        legend.position = c(0.13,0.87),
+        legend.background = element_rect(fill = "transparent"),
+        legend.text = element_text(size=8),
+        legend.key.size = unit(0.26,"cm"),
+        legend.spacing.x = unit(0.08,"cm"),
+        axis.title = element_text(size=8),
+        axis.text = element_text(size=8),
+        #axis.title = element_blank(),
+        #axis.text = element_blank(),
+        panel.grid = element_blank(),
+        panel.background = element_rect(color="transparent",fill = "transparent"),
+        panel.border = element_rect(colour="black",fill="transparent"),
+        panel.grid.major.x = element_line(linetype = "dotted", colour = "gray"))
+
+
+plot_clim_mtco
+```
+
+
+```{r}
+plot_clim_mtwa <- aux_clim |>
+  filter(variable == "mtwa") %>%
+  ggplot() +
+#  geom_ribbon(aes(x = calBP, ymin = lo, ymax = hi), fill = "grey70") +
+  geom_step(aes(x = age, y = anomaly_mean_squared),colour="#fa3c4c") +
+  expand_limits(x = c(0, 12500)) +
+ # scale_x_reverse(breaks = seq(3500, 12500, 500), expand = c(0, 0),labels = seq(3.5, 12.5,0.5)) +
+  scale_x_continuous(breaks = seq(0,12500,1000),labels = seq(0,12.5,1),expand = c(0.03,0.03))+
+  scale_y_continuous(expand = c(0, 0)) +
+  #annotate("text", x = 60, y = 0.45, label = "(b) SPD", size = 2, hjust=0) +
+  labs(x="Age (ky)", y= NULL) +
+   theme(legend.title = element_blank(),
+        legend.position = c(0.13,0.87),
+        legend.background = element_rect(fill = "transparent"),
+        legend.text = element_text(size=8),
+        legend.key.size = unit(0.26,"cm"),
+        legend.spacing.x = unit(0.08,"cm"),
+        axis.title = element_text(size=8),
+        axis.text = element_text(size=8),
+        #axis.title = element_blank(),
+        #axis.text = element_blank(),
+        panel.grid = element_blank(),
+        panel.background = element_rect(color="transparent",fill = "transparent"),
+        panel.border = element_rect(colour="black",fill="transparent"),
+        panel.grid.major.x = element_line(linetype = "dotted", colour = "gray"))
+
+
+plot_clim_mtwa
+```
+
+
+```{r}
+plot_clim_alpha <- aux_clim |>
+  filter(variable == "alpha_pred_corr") %>%
+  ggplot() +
+#  geom_ribbon(aes(x = calBP, ymin = lo, ymax = hi), fill = "grey70") +
+  geom_step(aes(x = age, y = anomaly_mean_squared),colour="#fa3c4c") +
+  expand_limits(x = c(0, 12500)) +
+ # scale_x_reverse(breaks = seq(3500, 12500, 500), expand = c(0, 0),labels = seq(3.5, 12.5,0.5)) +
+  scale_x_continuous(breaks = seq(0,12500,1000),labels = seq(0,12.5,1),expand = c(0.03,0.03))+
+  scale_y_continuous(expand = c(0, 0)) +
+  #annotate("text", x = 60, y = 0.45, label = "(b) SPD", size = 2, hjust=0) +
+  labs(x="Age (ky)", y= NULL) +
+   theme(legend.title = element_blank(),
+        legend.position = c(0.13,0.87),
+        legend.background = element_rect(fill = "transparent"),
+        legend.text = element_text(size=8),
+        legend.key.size = unit(0.26,"cm"),
+        legend.spacing.x = unit(0.08,"cm"),
+        axis.title = element_text(size=8),
+        axis.text = element_text(size=8),
+        #axis.title = element_blank(),
+        #axis.text = element_blank(),
+        panel.grid = element_blank(),
+        panel.background = element_rect(color="transparent",fill = "transparent"),
+        panel.border = element_rect(colour="black",fill="transparent"),
+        panel.grid.major.x = element_line(linetype = "dotted", colour = "gray"))
+
+
+plot_clim_alpha
+```
+
+
+```{r}
+plot_clim_gdd <- aux_clim |>
+  filter(variable == "gdd") %>%
+  ggplot() +
+#  geom_ribbon(aes(x = calBP, ymin = lo, ymax = hi), fill = "grey70") +
+  geom_step(aes(x = age, y = anomaly_mean_squared),colour="#fa3c4c") +
+  expand_limits(x = c(0, 12500)) +
+ # scale_x_reverse(breaks = seq(3500, 12500, 500), expand = c(0, 0),labels = seq(3.5, 12.5,0.5)) +
+  scale_x_continuous(breaks = seq(0,12500,1000),labels = seq(0,12.5,1),expand = c(0.03,0.03))+
+  scale_y_continuous(expand = c(0, 0)) +
+  #annotate("text", x = 60, y = 0.45, label = "(b) SPD", size = 2, hjust=0) +
+  labs(x="Age (ky)", y= NULL) +
+   theme(legend.title = element_blank(),
+        legend.position = c(0.13,0.87),
+        legend.background = element_rect(fill = "transparent"),
+        legend.text = element_text(size=8),
+        legend.key.size = unit(0.26,"cm"),
+        legend.spacing.x = unit(0.08,"cm"),
+        axis.title = element_text(size=8),
+        axis.text = element_text(size=8),
+        #axis.title = element_blank(),
+        #axis.text = element_blank(),
+        panel.grid = element_blank(),
+        panel.background = element_rect(color="transparent",fill = "transparent"),
+        panel.border = element_rect(colour="black",fill="transparent"),
+        panel.grid.major.x = element_line(linetype = "dotted", colour = "gray"))
+
+
+plot_clim_gdd
+```
+
+
+```{r}
+library(patchwork)
+```
+
+
+
+```{r}
+combined_plot <- (plot_med / plot_clim / plot_clim_mtwa / plot_clim_alpha / plot_clim_gdd)
+
+combined_plot
+```
+
+
+
+```{r}
+ggsave(plot=combined_plot,"combined_plot1.png", units = "cm", height = 24, width = 8)
+```
+
+
+
+
+```{r}
+#nsim <- 5 # number of actual simulations (set to 5 for full demo), 1000 in paper
+ncores <- 6 # multi-core processing (set higher if available)
+runm <- 50 #smoothing of SPDs
+binh <- 50 #bin clustering
+realstartBP <- 12500
+realendBP <-2500
+bracket <- 1000
+workingstartBP <- realstartBP+bracket
+workingendBP <- realendBP-bracket
+if (workingendBP<0){ workingendBP <- 0 }
+```
+
+
+```{r}
+alldates_my1 <- calibrate(x=latam1$Age, errors=latam1$Error, calCurves='intcal20', method="standard", normalised=FALSE, ncores=ncores, calMatrix=TRUE)
+
+
+bins_my1 <- binPrep(sites=latam1$SiteName, ages=latam1$Age, h=binh)
+
+allspd_my1 <- spd(x=alldates_my1, bins=bins_my1, timeRange=c(workingstartBP,workingendBP), datenormalised=FALSE, runm=runm)
+
+
+prueba1 <- allspd_my1 |> purrr::pluck(2) |> as.data.frame() |>
+  filter(calBP<=12500 & calBP >=4500)
+
+spd_plot<- ggplot() +
+  geom_line(data=prueba1,aes(x=calBP,y=PrDens))  +
+ # expand_limits(x=c(3000,8500))+
+ # scale_x_continuous(breaks = seq(4500,8500,1000),expand = c(0,0)) +
+  scale_x_reverse() +
+  scale_y_continuous(expand = c(0,0)) +
+  theme(panel.grid = element_blank(),
+        plot.title=element_text(size=8, vjust=-1),
+        plot.subtitle=element_text(size=6,vjust=-1),
+        panel.border = element_rect(fill="transparent",color="black"),
+        panel.background = element_rect(fill="transparent"),
+       # axis.title = element_blank(),
+        #axis.text = element_blank(),
+        legend.key.size = unit(0.3,"cm"),
+        legend.margin = unit(0.05,"cm"),
+        legend.box.margin = margin(0.1,unit="cm"),
+        legend.box.spacing = unit(0.3,"cm")) 
+ 
+spd_plot
+```
+
+
+```{r}
+latam1_a <- latam1 |> filter(Value == 18)
+
+ggplot() +
+  geom_sf(data = latin_america_polygon) +
+  geom_point(data=latam1_a, aes(x=longitude,y=latitude, colour=Value)) 
+
+
+alldates_my1 <- calibrate(x=latam1_a$Age, errors=latam1_a$Error, calCurves='intcal20', method="standard", normalised=FALSE, ncores=ncores, calMatrix=TRUE)
+
+
+bins_my1 <- binPrep(sites=latam1_a$SiteName, ages=latam1_a$Age, h=binh)
+
+allspd_my1 <- spd(x=alldates_my1, bins=bins_my1, timeRange=c(workingstartBP,workingendBP), datenormalised=FALSE, runm=runm)
+
+
+prueba1 <- allspd_my1 |> purrr::pluck(2) |> as.data.frame() |>
+  filter(calBP<=12500 & calBP >=4500)
+
+plot2 <- ggplot() +
+  geom_line(data=prueba1,aes(x=calBP,y=PrDens))  +
+ # expand_limits(x=c(3000,8500))+
+ # scale_x_continuous(breaks = seq(4500,8500,1000),expand = c(0,0)) +
+  scale_x_reverse() +
+  scale_y_continuous(expand = c(0,0)) +
+  theme(panel.grid = element_blank(),
+        plot.title=element_text(size=8, vjust=-1),
+        plot.subtitle=element_text(size=6,vjust=-1),
+        panel.border = element_rect(fill="transparent",color="black"),
+        panel.background = element_rect(fill="transparent"),
+       # axis.title = element_blank(),
+        #axis.text = element_blank(),
+        legend.key.size = unit(0.3,"cm"),
+        legend.margin = unit(0.05,"cm"),
+        legend.box.margin = margin(0.1,unit="cm"),
+        legend.box.spacing = unit(0.3,"cm")) 
+ 
+plot2
+```
+
+
+
+```{r}
+latam1_b<- latam1 |> filter(Value == 20)
+
+ggplot() +
+  geom_sf(data = latin_america_polygon) +
+  geom_point(data=latam1_b, aes(x=longitude,y=latitude, colour=Value)) 
+
+
+alldates_my1 <- calibrate(x=latam1_b$Age, errors=latam1_b$Error, calCurves='intcal20', method="standard", normalised=FALSE, ncores=ncores, calMatrix=TRUE)
+
+
+bins_my1 <- binPrep(sites=latam1_b$SiteName, ages=latam1_b$Age, h=binh)
+
+allspd_my1 <- spd(x=alldates_my1, bins=bins_my1, timeRange=c(workingstartBP,workingendBP), datenormalised=FALSE, runm=runm)
+
+
+prueba1 <- allspd_my1 |> purrr::pluck(2) |> as.data.frame() |>
+  filter(calBP<=12500 & calBP >=4500)
+
+plot3 <- ggplot() +
+  geom_line(data=prueba1,aes(x=calBP,y=PrDens))  +
+ # expand_limits(x=c(3000,8500))+
+ # scale_x_continuous(breaks = seq(4500,8500,1000),expand = c(0,0)) +
+  scale_x_reverse() +
+  scale_y_continuous(expand = c(0,0)) +
+  theme(panel.grid = element_blank(),
+        plot.title=element_text(size=8, vjust=-1),
+        plot.subtitle=element_text(size=6,vjust=-1),
+        panel.border = element_rect(fill="transparent",color="black"),
+        panel.background = element_rect(fill="transparent"),
+       # axis.title = element_blank(),
+        #axis.text = element_blank(),
+        legend.key.size = unit(0.3,"cm"),
+        legend.margin = unit(0.05,"cm"),
+        legend.box.margin = margin(0.1,unit="cm"),
+        legend.box.spacing = unit(0.3,"cm")) 
+ 
+plot3
+```
+
+
+```{r}
+latam1_c<- latam1 |> filter(Value == 22)
+
+ggplot() +
+  geom_sf(data = latin_america_polygon) +
+  geom_point(data=latam1_c, aes(x=longitude,y=latitude, colour=Value)) 
+
+
+alldates_my1 <- calibrate(x=latam1_c$Age, errors=latam1_c$Error, calCurves='intcal20', method="standard", normalised=FALSE, ncores=ncores, calMatrix=TRUE)
+
+
+bins_my1 <- binPrep(sites=latam1_c$SiteName, ages=latam1_c$Age, h=binh)
+
+allspd_my1 <- spd(x=alldates_my1, bins=bins_my1, timeRange=c(workingstartBP,workingendBP), datenormalised=FALSE, runm=runm)
+
+
+prueba1 <- allspd_my1 |> purrr::pluck(2) |> as.data.frame() |>
+  filter(calBP<=12500 & calBP >=4500)
+
+plot4 <- ggplot() +
+  geom_line(data=prueba1,aes(x=calBP,y=PrDens))  +
+ # expand_limits(x=c(3000,8500))+
+ # scale_x_continuous(breaks = seq(4500,8500,1000),expand = c(0,0)) +
+  scale_x_reverse() +
+  scale_y_continuous(expand = c(0,0)) +
+  theme(panel.grid = element_blank(),
+        plot.title=element_text(size=8, vjust=-1),
+        plot.subtitle=element_text(size=6,vjust=-1),
+        panel.border = element_rect(fill="transparent",color="black"),
+        panel.background = element_rect(fill="transparent"),
+       # axis.title = element_blank(),
+        #axis.text = element_blank(),
+        legend.key.size = unit(0.3,"cm"),
+        legend.margin = unit(0.05,"cm"),
+        legend.box.margin = margin(0.1,unit="cm"),
+        legend.box.spacing = unit(0.3,"cm")) 
+ 
+plot4
+```
+
+
